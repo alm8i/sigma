@@ -1,0 +1,15 @@
+title: Fidelis field mapping
+order: 20
+backends:
+  - fidelis
+fieldmappings:
+  Image: path
+  CommandLine: parameters
+  Command: parameters
+  Name: name
+  User: user
+  Username: user
+  ProcessName: name
+  ProcessCommandLine: parameters
+
+
