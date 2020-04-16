@@ -24,6 +24,7 @@ class FindelisBackend(BaseBackend,QuoteCharMixin):
     active = True
     default_config = ["fidelis", "sysmon"]
     reEscape = re.compile('(\\\\)')
+    _isdebug = False
 
     #try to fix this with regex and stuff 
     #reClear = re.compile('[*]')
@@ -47,6 +48,7 @@ class FindelisBackend(BaseBackend,QuoteCharMixin):
     }
     # Start with positive operators and switch negative if NOT statement
     _operator_set = _operators
+    _direction = "positive"
     
     # for debuging
     boolean_path = ""
@@ -60,7 +62,9 @@ class FindelisBackend(BaseBackend,QuoteCharMixin):
         """Method is called for each sigma rule and receives the parsed rule (SigmaParser)"""
         self.title = sigmaparser.parsedyaml["title"]
         self.description = sigmaparser.parsedyaml["description"]
-      
+       
+        #print([x.split("|")[0] for x in sigmaparser.values.keys()])
+
         logsource = sigmaparser.get_logsource()
         if logsource is None:
             self.indices = None
@@ -73,14 +77,16 @@ class FindelisBackend(BaseBackend,QuoteCharMixin):
             self.interval = sigmaparser.parsedyaml['detection']['timeframe']
         except:
             pass
-
-        print("------------------------START OF DEBUGGING---------------------------")
+        
+        if (self._isdebug):
+            print("------------------------START OF DEBUGGING---------------------------")
+        
         for parsed in sigmaparser.condparsed:
             self.generateBefore(parsed)
             self.generateQuery(parsed)
             self.generateAfter(parsed)
-
-   
+        
+    
 
     def generateQuery(self, parsed):
         self.queries[-1]['criteriaV3']['filter'] = self.generateNode(parsed.parsedSearch)
@@ -105,35 +111,49 @@ class FindelisBackend(BaseBackend,QuoteCharMixin):
             return self._operator_set["equal"]
     
     def debug(self,node):
-        print("")
-        print(" --- Node details: \n"+str(node))
+        if (self._isdebug):
+            print("")
+            print(" --- Node details: \n"+str(node))
+            
+            if(type(node) in {ConditionNOT, ConditionOR, ConditionAND, NodeSubexpression}):
+                print("       \---- Node ITEMS type: "+str(type(node.items)))
+                for item in node.items:
+                    print("             \--------Item type: "+str(type(item)))
+            else:
+                print("       \---- Node type: "+str(type(node)))
         
-        if(type(node) in {ConditionNOT, ConditionOR, ConditionAND, NodeSubexpression}):
-            print("       \---- Node ITEMS type: "+str(type(node.items)))
-            for item in node.items:
-                print("             \--------Item type: "+str(type(item)))
-        else:
-            print("       \---- Node type: "+str(type(node)))
-    
     def generateANDNode(self, node):
-      
+          
+
         #debug
         self.debug(node)
 
-        andNode = {'filterType': 'composite', 'logic':'and','filters':[]}  
+         # if NOT condition we change AND to OR
+        if (self._direction=="negative"):
+            andNode = {'filterType': 'composite', 'logic':'or','filters':[]}  
+        else:
+            andNode = {'filterType': 'composite', 'logic':'and','filters':[]}  
+
         generated = [ self.generateNode(val) for val in node ]         
         andNode['filters'] = generated
         
+
         return andNode
     
     def generateORNode(self, node):
-     
+          
         #debug
         self.debug(node)
 
-        orNode = {'filterType':'composite','logic':'or','filters':[]}       
+        # if NOT condition we change OR to AND
+        if (self._direction=="negative"):
+            orNode = {'filterType':'composite','logic':'and','filters':[]}    
+        else:
+            orNode = {'filterType':'composite','logic':'or','filters':[]}       
+        
         generated = [ self.generateNode(val) for val in node ]         
         orNode['filters'] = generated
+
            
         return orNode
     
@@ -146,14 +166,22 @@ class FindelisBackend(BaseBackend,QuoteCharMixin):
     
     def generateNOTNode(self, node):
         
+        #set direction
+        self._direction = "negative"
         #debug
         self.debug(node)
 
         #change operator set to negative operators
-        self._operator_set = self._operators_neg
+        self._operator_set = self._operators_neg    
+        generated = self.generateNode(node.item)
 
 
-        return self.generateNode(node.item)
+        #change operator set back to positive operators
+        self._operator_set = self._operators    
+        #set direction back to positive
+        self._direction = "positive"
+
+        return  generated
        
         
     #Currently not used since in generateMapItemNode we return the value directly
@@ -176,7 +204,12 @@ class FindelisBackend(BaseBackend,QuoteCharMixin):
             if (len(value)==1):
                       return {'filterType':'criteria','column':key,'operator':self.getOperator(value[0]),'value':self.cleanValue(str(value[0])) }
             else:
-                orNode = {'filterType':'composite','logic':'or','filters':[]}
+                # if NOT condition we change OR to AND
+                if (self._direction=="negative"):
+                    orNode = {'filterType':'composite','logic':'and','filters':[]}    
+                else:
+                    orNode = {'filterType':'composite','logic':'or','filters':[]}    
+
                 for v in value:
                     orNode['filters'].append({'filterType':'criteria','column':key,'operator':self.getOperator(v),'value':self.cleanValue(str(v)) })                              
                 return orNode
@@ -235,12 +268,16 @@ class FindelisBackend(BaseBackend,QuoteCharMixin):
         Is called after the last file was processed with generate(). The right place if this backend is not intended to
         look isolated at each rule, but generates an output which incorporates multiple rules, e.g. dashboards.
         """
-        print("-----------------------------BOOLEAN PATH----------------------")
-        print(self.boolean_path)
-      
-        print("-----------------------------END of DEBUGGING----------------------")
-      
-        
+        if (self._isdebug):    
+            print("-----------------------------BOOLEAN PATH----------------------")
+            print(self.boolean_path)
+            print("")
+            print("-----------------------------END of DEBUGGING----------------------")
+            print("")
+            print("-----------------------------RAW RULE----------------------")
+            print(json.dumps(self.queries[0], indent=2))
+
+
         template="""
 {
     "AlertRuleId": "__uid__",
@@ -277,13 +314,14 @@ class FindelisBackend(BaseBackend,QuoteCharMixin):
         """
         _uid=uuid.uuid1()
        
-        with open('sigma_fidelis_out.json', 'w') as f:
-            rule = json.dumps(self.queries[0], indent=1).replace("\"","\\\"").replace("\n","")
-            rule = re.sub(' +', ' ',rule)
-            template = template.replace("__rule__",rule).replace("__uid__",str(_uid))
-            template = template.replace("__name__","[SIGMA TEST - "+self.title+"]").replace("__description__",self.description)
-            template = template.replace("__datetime__",datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S.%f'))
-            f.write(template)
- 
-        return json.dumps(self.queries[0], indent=2)
+      
+        rule = json.dumps(self.queries[0], indent=1).replace("\"","\\\"").replace("\n","")
+        rule = re.sub(' +', ' ',rule)
+        template = template.replace("__rule__",rule).replace("__uid__",str(_uid))
+        template = template.replace("__name__","[SIGMA TEST - "+self.title+"]").replace("__description__",self.description)
+        template = template.replace("__datetime__",datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S.%f'))
+
+        return template
+    
+       
         
